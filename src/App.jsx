@@ -1,12 +1,29 @@
 import { useState, useEffect } from "react";
 import { supabase } from "./supabaseClient";
 import { jobFromDB, linkFromDB, profileFromDB } from "./utils/db";
-import AuthScreen from "./pages/AuthScreen";
 import Tracker from "./pages/Tracker";
 import Reminders from "./pages/Reminders";
 import ProfileHub from "./pages/ProfileHub";
 
-// ─── Nav definition ───────────────────────────────────────────────────────────
+// ─── Fixed owner ID ───────────────────────────────────────────────────────────
+// This is a hardcoded UUID used as user_id for all DB rows.
+// Same ID is used on every device — no login needed.
+// Change this value if you ever need to reset all data.
+const OWNER_ID = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
+
+// ─── Default links ────────────────────────────────────────────────────────────
+
+const DEFAULT_LINKS = [
+  { label: "LinkedIn",  url: "https://linkedin.com/in/yourname", subtitle: "linkedin.com/in/yourname", color: "bg-blue-500",   no_url: false, sort_order: 0 },
+  { label: "GitHub",    url: "https://github.com/yourname",      subtitle: "github.com/yourname",      color: "bg-gray-700",   no_url: false, sort_order: 1 },
+  { label: "Portfolio", url: "https://yoursite.dev",             subtitle: "yoursite.dev",             color: "bg-purple-500", no_url: false, sort_order: 2 },
+  { label: "Resume",    url: "",                                 subtitle: "v1 — Mar 2026",            color: "bg-orange-500", no_url: true,  sort_order: 3 },
+  { label: "Email",     url: "mailto:your@email.com",            subtitle: "your@email.com",           color: "bg-green-500",  no_url: false, sort_order: 4 },
+];
+
+const EMPTY_PROFILE = { name: "", title: "", bio: "", linkedin: "", github: "", portfolio: "", skills: "" };
+
+// ─── Nav ──────────────────────────────────────────────────────────────────────
 
 const NAV = [
   {
@@ -43,27 +60,7 @@ const NAV = [
   },
 ];
 
-const SignOutIcon = () => (
-  <svg className="w-4 h-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
-    <polyline points="16 17 21 12 16 7" />
-    <line x1="21" y1="12" x2="9" y2="12" />
-  </svg>
-);
-
-// ─── Default links seeded for new users ───────────────────────────────────────
-
-const DEFAULT_LINKS = [
-  { label: "LinkedIn",  url: "https://linkedin.com/in/yourname", subtitle: "linkedin.com/in/yourname", color: "bg-blue-500",   no_url: false, sort_order: 0 },
-  { label: "GitHub",    url: "https://github.com/yourname",      subtitle: "github.com/yourname",      color: "bg-gray-700",   no_url: false, sort_order: 1 },
-  { label: "Portfolio", url: "https://yoursite.dev",             subtitle: "yoursite.dev",             color: "bg-purple-500", no_url: false, sort_order: 2 },
-  { label: "Resume",    url: "",                                 subtitle: "v1 — Mar 2026",            color: "bg-orange-500", no_url: true,  sort_order: 3 },
-  { label: "Email",     url: "mailto:your@email.com",            subtitle: "your@email.com",           color: "bg-green-500",  no_url: false, sort_order: 4 },
-];
-
-const EMPTY_PROFILE = { name: "", title: "", bio: "", linkedin: "", github: "", portfolio: "", skills: "" };
-
-// ─── Loading spinner ──────────────────────────────────────────────────────────
+// ─── Spinner ──────────────────────────────────────────────────────────────────
 
 function Spinner() {
   return (
@@ -76,66 +73,32 @@ function Spinner() {
 // ─── App ──────────────────────────────────────────────────────────────────────
 
 export default function App() {
-  const [session, setSession]               = useState(undefined); // undefined = not yet checked
-  const [page, setPage]                     = useState("tracker");
-  // null = not yet loaded from Supabase; array = loaded (may be empty)
-  const [jobs, setJobs]                     = useState(null);
-  const [links, setLinks]                   = useState(null);
-  const [profile, setProfile]               = useState(EMPTY_PROFILE);
-  const [dataError, setDataError]           = useState("");
+  const [page,    setPage]    = useState("tracker");
+  const [jobs,    setJobs]    = useState(null);   // null = loading
+  const [links,   setLinks]   = useState(null);
+  const [profile, setProfile] = useState(EMPTY_PROFILE);
+  const [dataError, setDataError] = useState("");
   const [showMigrationBanner, setShowMigrationBanner] = useState(false);
 
-  // ── Auth listener ──────────────────────────────────────────────────────────
+  // Fetch everything on mount — no auth needed
+  useEffect(() => { fetchAllData(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  useEffect(() => {
-    // Get current session immediately
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setSession(session ?? null);
-    });
-
-    // Subscribe to future auth changes
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_, session) => {
-      setSession(session ?? null);
-    });
-
-    return () => subscription.unsubscribe();
-  }, []);
-
-  // ── Fetch data whenever the logged-in user changes ─────────────────────────
-
-  useEffect(() => {
-    if (session === undefined) return; // still checking auth — wait
-    if (!session) {
-      // Signed out: clear everything
-      setJobs(null);
-      setLinks(null);
-      setProfile(EMPTY_PROFILE);
-      setShowMigrationBanner(false);
-      return;
-    }
-    fetchAllData(session.user.id);
-  }, [session?.user?.id]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  async function fetchAllData(userId) {
-    setJobs(null);   // null triggers the loading spinner
-    setLinks(null);
+  async function fetchAllData() {
     setDataError("");
-
     try {
       const [jobsRes, linksRes, profileRes] = await Promise.all([
-        supabase.from("jobs").select("*").eq("user_id", userId).order("created_at", { ascending: false }),
-        supabase.from("links").select("*").eq("user_id", userId).order("sort_order"),
-        supabase.from("profiles").select("*").eq("user_id", userId).maybeSingle(),
+        supabase.from("jobs").select("*").eq("user_id", OWNER_ID).order("created_at", { ascending: false }),
+        supabase.from("links").select("*").eq("user_id", OWNER_ID).order("sort_order"),
+        supabase.from("profiles").select("*").eq("user_id", OWNER_ID).maybeSingle(),
       ]);
 
       if (jobsRes.error) throw jobsRes.error;
       if (linksRes.error) throw linksRes.error;
-      // profileRes error is allowed (user may not have a profile row yet)
 
       const fetchedJobs = (jobsRes.data || []).map(jobFromDB);
       setJobs(fetchedJobs);
 
-      // Check if local-storage data should be migrated
+      // Check for local-storage migration
       if (fetchedJobs.length === 0) {
         try {
           const raw = localStorage.getItem("jobhub_jobs");
@@ -143,12 +106,12 @@ export default function App() {
             const local = JSON.parse(raw);
             if (Array.isArray(local) && local.length > 0) setShowMigrationBanner(true);
           }
-        } catch { /* ignore corrupt localStorage */ }
+        } catch { /* ignore */ }
       }
 
-      // Seed five default links for brand-new users
+      // Seed default links on first load
       if (!linksRes.data || linksRes.data.length === 0) {
-        const rows = DEFAULT_LINKS.map((l) => ({ ...l, user_id: userId }));
+        const rows = DEFAULT_LINKS.map((l) => ({ ...l, user_id: OWNER_ID }));
         const { data: seeded } = await supabase.from("links").insert(rows).select();
         setLinks((seeded || []).map(linkFromDB));
       } else {
@@ -158,35 +121,34 @@ export default function App() {
       setProfile(profileRes.data ? profileFromDB(profileRes.data) : EMPTY_PROFILE);
 
     } catch (err) {
-      setDataError("Failed to load your data: " + (err.message || "Unknown error"));
-      // Still set empty arrays so the UI renders rather than staying on spinner
+      setDataError("Failed to load data: " + (err.message || "Unknown error"));
       setJobs([]);
       setLinks([]);
     }
   }
 
-  // ── Local-storage migration ────────────────────────────────────────────────
+  // ── Migration from localStorage ────────────────────────────────────────────
 
   async function handleMigrationImport() {
     try {
       const raw = localStorage.getItem("jobhub_jobs");
-      if (!raw || !session) { setShowMigrationBanner(false); return; }
+      if (!raw) { setShowMigrationBanner(false); return; }
       const localJobs = JSON.parse(raw);
       if (!Array.isArray(localJobs) || localJobs.length === 0) { setShowMigrationBanner(false); return; }
 
       const now = new Date().toISOString();
       const rows = localJobs.map((j) => ({
-        user_id: session.user.id,
-        company: j.company || "",
-        role: j.role || "",
+        user_id:     OWNER_ID,
+        company:     j.company || "",
+        role:        j.role || "",
         date_applied: j.dateApplied || null,
-        status: j.status || "Applied",
-        source: j.source || "",
-        category: j.category || "SWE",
-        notes: j.notes || "",
-        job_url: j.jobUrl || "",
-        updated_at: j.updatedAt || now,
-        log: j.log || [],
+        status:      j.status || "Applied",
+        source:      j.source || "",
+        category:    j.category || "SWE",
+        notes:       j.notes || "",
+        job_url:     j.jobUrl || "",
+        updated_at:  j.updatedAt || now,
+        log:         j.log || [],
       }));
 
       const { data, error } = await supabase.from("jobs").insert(rows).select();
@@ -196,20 +158,8 @@ export default function App() {
         localStorage.removeItem("jobhub_links");
         localStorage.removeItem("jobhub_profile");
       }
-    } catch { /* ignore errors during migration */ }
+    } catch { /* ignore */ }
     setShowMigrationBanner(false);
-  }
-
-  function handleMigrationDismiss() {
-    // Just clear the banner; don't delete localStorage so they can try again later
-    setShowMigrationBanner(false);
-  }
-
-  // ── Sign out ───────────────────────────────────────────────────────────────
-
-  async function handleSignOut() {
-    await supabase.auth.signOut();
-    setPage("tracker");
   }
 
   // ── Derived ────────────────────────────────────────────────────────────────
@@ -220,23 +170,20 @@ export default function App() {
     return days >= 7;
   }).length;
 
-  // ── Render gates ──────────────────────────────────────────────────────────
+  // ── Loading gate ───────────────────────────────────────────────────────────
 
-  if (session === undefined) return <Spinner />;                  // auth not yet resolved
-  if (!session) return <AuthScreen />;                            // not logged in
-  if (jobs === null || links === null) return <Spinner />;        // data still loading
+  if (jobs === null || links === null) return <Spinner />;
 
-  // ── Main app ──────────────────────────────────────────────────────────────
+  // ── Main app ───────────────────────────────────────────────────────────────
 
   return (
     <div className="flex min-h-screen bg-gray-100 font-sans">
 
-      {/* ── Sidebar — hidden on mobile ────────────────────────────────────── */}
+      {/* Sidebar — desktop only */}
       <aside className="hidden md:flex w-52 bg-white border-r border-gray-200 flex-col shrink-0">
         <div className="px-4 py-5 border-b border-gray-200">
           <span className="text-lg font-bold text-indigo-600">JobHub</span>
         </div>
-
         <nav className="flex-1 py-3">
           {NAV.map((item) => (
             <button
@@ -258,25 +205,15 @@ export default function App() {
             </button>
           ))}
         </nav>
-
-        <div className="px-4 py-2 text-xs text-gray-400">
+        <div className="px-4 py-3 border-t border-gray-200 text-xs text-gray-400">
           {jobs.length} job{jobs.length !== 1 ? "s" : ""} tracked
         </div>
-
-        <button
-          onClick={handleSignOut}
-          className="mx-3 mb-3 px-3 py-2 text-sm text-gray-500 border border-gray-200 rounded-lg hover:bg-gray-50 flex items-center gap-2 min-h-[40px]"
-        >
-          <SignOutIcon />
-          Sign Out
-        </button>
       </aside>
 
-      {/* ── Main content ──────────────────────────────────────────────────── */}
+      {/* Main content */}
       <div className="flex-1 flex flex-col min-h-screen">
         <main className="flex-1 p-4 md:p-6 overflow-auto pb-20 md:pb-6">
 
-          {/* Global data error */}
           {dataError && (
             <div className="mb-4 px-4 py-3 bg-red-50 border border-red-200 rounded-xl text-sm text-red-700 flex items-center justify-between">
               <span>{dataError}</span>
@@ -290,24 +227,18 @@ export default function App() {
               setJobs={setJobs}
               links={links}
               setLinks={setLinks}
-              userId={session.user.id}
+              userId={OWNER_ID}
               showMigrationBanner={showMigrationBanner}
               onImportMigration={handleMigrationImport}
-              onDismissMigration={handleMigrationDismiss}
+              onDismissMigration={() => setShowMigrationBanner(false)}
             />
           )}
           {page === "reminders" && <Reminders jobs={jobs} />}
-          {page === "profile" && (
-            <ProfileHub
-              profile={profile}
-              setProfile={setProfile}
-              userId={session.user.id}
-            />
-          )}
+          {page === "profile"   && <ProfileHub profile={profile} setProfile={setProfile} userId={OWNER_ID} />}
         </main>
 
-        {/* ── Bottom nav — mobile only ───────────────────────────────────── */}
-        <nav className="md:hidden fixed bottom-0 left-0 right-0 bg-white border-t border-gray-200 flex z-40 safe-area-inset-bottom">
+        {/* Bottom nav — mobile only */}
+        <nav className="md:hidden fixed bottom-0 left-0 right-0 bg-white border-t border-gray-200 flex z-40">
           {NAV.map((item) => (
             <button
               key={item.id}
@@ -325,13 +256,6 @@ export default function App() {
               )}
             </button>
           ))}
-          <button
-            onClick={handleSignOut}
-            className="flex-1 flex flex-col items-center justify-center py-2 min-h-[56px] text-xs text-gray-500"
-          >
-            <SignOutIcon />
-            <span className="mt-0.5">Sign Out</span>
-          </button>
         </nav>
       </div>
     </div>
